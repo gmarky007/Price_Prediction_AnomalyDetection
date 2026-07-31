@@ -22,6 +22,66 @@ import sklearn.preprocessing
 
 sys.modules['pipeline'] = sklearn.pipeline
 sys.modules['sklearn.pipeline.Pipeline'] = sklearn.pipeline.Pipeline
+sys.modules['Price_Prediction_AnomalyDetection'] = sys.modules[__name__]
+
+# Helper functions for pickle compatibility
+def map_competitor_group(row):
+    brand = str(row.get('Thương hiệu', '')).lower()
+    model = str(row.get('Dòng xe', '')).lower()
+    bike_type = str(row.get('Loại xe', '')).lower()
+    engine = row.get('Dung_tich_cc', None)
+    price = row.get('Giá', 0.0)
+    if (pd.notna(engine) and engine > 175) or any(k in brand for k in ['ducati', 'harley', 'bmw', 'triumph', 'kawasaki', 'ktm']) or any(k in model for k in ['z1000', 'cb400', 'cb650', 'r1', 'r6', 'z800', 'z900']) or price > 150:
+        return 'Xe Phân Khối Lớn (>175cc)'
+    elif (pd.notna(engine) and engine == 50) or any(k in model for k in ['cub', 'chaly']):
+        if 'tay ga' in bike_type or 'giorno' in model or 'scoopy' in model: return 'Xe tay ga phổ thông'
+        return 'Xe số phổ thông'
+    elif any(k in model for k in ['vespa', 'sh', 'medley', 'pcx', 'gts', 'sprint', 'primavera', 'lx']) or 'piaggio' in brand:
+        return 'Xe tay ga cao cấp'
+    elif 'tay ga' in bike_type or any(k in model for k in ['air blade', 'vision', 'lead', 'janus', 'nvx', 'vario', 'click', 'lesta', 'giorno', 'grande', 'latte']):
+        if price >= 60 and 'vision' not in model and 'janus' not in model: return 'Xe tay ga cao cấp'
+        return 'Xe tay ga phổ thông'
+    elif 'tay côn' in bike_type or any(k in model for k in ['exciter', 'winner', 'raider', 'satria', 'sonic', 'axelo', 'r15', 'cbr150']):
+        return 'Xe côn tay thể thao'
+    else: return 'Xe số phổ thông'
+
+def get_nlp_flag(row, pattern):
+    text = (str(row.get('Tiêu đề', '')) + " " + str(row.get('Mô tả chi tiết', ''))).lower()
+    return int(bool(re.search(pattern, text)))
+
+def correct_typo_prices(row):
+    price = row.get('Giá', 0.0)
+    min_p = row.get('Gia_min', 0.0)
+    max_p = row.get('Gia_max', 0.0)
+    if pd.notna(min_p) and pd.notna(max_p) and price > 100:
+        if price / 10 >= min_p * 0.5 and price / 10 <= max_p * 2.0:
+            row['Giá'] = price / 10
+    return row
+
+def group_mad_zscore(g):
+    med = g['abs_resid'].median()
+    mad = np.median(np.abs(g['abs_resid'] - med))
+    if mad == 0 or np.isnan(mad): mad = 1.0
+    return (g['abs_resid'] - med) / (1.4826 * mad)
+
+def quantile_score(g):
+    p5 = g['Giá'].quantile(0.05)
+    p95 = g['Giá'].quantile(0.95)
+    s = np.zeros(len(g))
+    below = g['Giá'] < p5
+    above = g['Giá'] > p95
+    s[below] = (p5 - g.loc[below, 'Giá']) / max(p5, 1.0)
+    s[above] = (g.loc[above, 'Giá'] - p95) / max(p95, 1.0)
+    return pd.Series(np.clip(s, 0, 1), index=g.index)
+
+def market_range_score(row):
+    p = row.get('Giá', 0.0)
+    g_min = row.get('Gia_min', 0.0)
+    g_max = row.get('Gia_max', 0.0)
+    if pd.isna(g_min) or pd.isna(g_max): return 0.0
+    if p < g_min * 0.8: return min(1.0, (g_min * 0.8 - p) / (g_min * 0.8))
+    if p > g_max * 1.2: return min(1.0, (p - g_max * 1.2) / (g_max * 1.2))
+    return 0.0
 
 # -------------------------------------------------------------
 # 1. THIẾT LẬP CẤU HÌNH TRANG STREAMLIT & ENTERPRISE DESIGN SYSTEM
@@ -128,21 +188,70 @@ def load_ml_resources():
     submodels_path = os.path.join(data_dir, 'submodels_trained.pkl')
     data_path = os.path.join(data_dir, 'data_motobikes.xlsx')
     
-    global_pipe = joblib.load(global_path) if os.path.exists(global_path) else None
-    submodels_dict = joblib.load(submodels_path) if os.path.exists(submodels_path) else {}
+    global_pipe = None
+    submodels_dict = {}
+    try:
+        if os.path.exists(global_path):
+            global_pipe = joblib.load(global_path)
+    except Exception as e:
+        st.error(f"Lỗi nạp global_pipeline.pkl: {e}")
+        
+    try:
+        if os.path.exists(submodels_path):
+            submodels_dict = joblib.load(submodels_path)
+    except Exception as e:
+        st.error(f"Lỗi nạp submodels_trained.pkl: {e}")
     
+    # Vá lỗi tương thích phiên bản scikit-learn (SimpleImputer._fill_dtype -> _fit_dtype)
+    from sklearn.impute import SimpleImputer
+    def fix_imputer(obj):
+        if isinstance(obj, SimpleImputer):
+            if not hasattr(obj, '_fill_dtype') and hasattr(obj, '_fit_dtype'):
+                obj._fill_dtype = obj._fit_dtype
+        if hasattr(obj, 'named_steps'):
+            for step in obj.named_steps.values():
+                fix_imputer(step)
+        if hasattr(obj, 'transformers_'):
+            for name, trans, cols in obj.transformers_:
+                fix_imputer(trans)
+
+    if submodels_dict:
+        for info in submodels_dict.values():
+            if 'pipeline' in info:
+                fix_imputer(info['pipeline'])
+    if global_pipe:
+        fix_imputer(global_pipe)
+
+    model_medians_ci = {}
+    brand_type_medians_ci = {}
+    type_medians_ci = {}
+
     if os.path.exists(data_path):
         df_bikes = pd.read_excel(data_path)
         if 'Giá' in df_bikes.columns:
             df_bikes['Giá'] = df_bikes['Giá'].apply(parse_price_value)
         if 'Năm đăng ký' in df_bikes.columns:
             df_bikes['Năm đăng ký'] = pd.to_numeric(df_bikes['Năm đăng ký'], errors='coerce')
+
+        df_clean = df_bikes[df_bikes['Giá'] > 1.0].copy() if 'Giá' in df_bikes.columns else pd.DataFrame()
+        if not df_clean.empty:
+            for (b, m), grp in df_clean.groupby(['Thương hiệu', 'Dòng xe']):
+                k = (str(b).strip().lower(), str(m).strip().lower())
+                model_medians_ci[k] = float(grp['Giá'].median())
+
+            for (b, t), grp in df_clean.groupby(['Thương hiệu', 'Loại xe']):
+                k = (str(b).strip().lower(), str(t).strip().lower())
+                brand_type_medians_ci[k] = float(grp['Giá'].median())
+
+            for t, grp in df_clean.groupby('Loại xe'):
+                k = str(t).strip().lower()
+                type_medians_ci[k] = float(grp['Giá'].median())
     else:
         df_bikes = pd.DataFrame()
         
-    return global_pipe, submodels_dict, df_bikes
+    return global_pipe, submodels_dict, df_bikes, model_medians_ci, brand_type_medians_ci, type_medians_ci
 
-global_pipe, submodels_dict, df_bikes = load_ml_resources()
+global_pipe, submodels_dict, df_bikes, model_medians_ci, brand_type_medians_ci, type_medians_ci = load_ml_resources()
 
 # -------------------------------------------------------------
 # 3. DYNAMIC DUAL-TIER CATALOG LOADER (37 BRANDS & 224 MODELS)
@@ -391,68 +500,7 @@ def resolve_strict_vehicle(selected_brand, selected_type, selected_model, select
 
     return brand, model, bike_type, final_cc
 
-@st.cache_resource
-def load_ml_resources():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    data_dir = os.path.join(base_dir, 'data')
-    
-    global_path = os.path.join(data_dir, 'global_pipeline.pkl')
-    submodels_path = os.path.join(data_dir, 'submodels_trained.pkl')
-    data_path = os.path.join(data_dir, 'data_motobikes.xlsx')
-    
-    global_pipe = joblib.load(global_path) if os.path.exists(global_path) else None
-    submodels_dict = joblib.load(submodels_path) if os.path.exists(submodels_path) else {}
-    
-    # Vá lỗi tương thích phiên bản scikit-learn (SimpleImputer._fill_dtype -> _fit_dtype)
-    from sklearn.impute import SimpleImputer
-    def fix_imputer(obj):
-        if isinstance(obj, SimpleImputer):
-            if not hasattr(obj, '_fill_dtype') and hasattr(obj, '_fit_dtype'):
-                obj._fill_dtype = obj._fit_dtype
-        if hasattr(obj, 'named_steps'):
-            for step in obj.named_steps.values():
-                fix_imputer(step)
-        if hasattr(obj, 'transformers_'):
-            for name, trans, cols in obj.transformers_:
-                fix_imputer(trans)
 
-    if submodels_dict:
-        for info in submodels_dict.values():
-            if 'pipeline' in info:
-                fix_imputer(info['pipeline'])
-    if global_pipe:
-        fix_imputer(global_pipe)
-
-    model_medians_ci = {}
-    brand_type_medians_ci = {}
-    type_medians_ci = {}
-
-    if os.path.exists(data_path):
-        df_bikes = pd.read_excel(data_path)
-        if 'Giá' in df_bikes.columns:
-            df_bikes['Giá'] = df_bikes['Giá'].apply(parse_price_value)
-        if 'Năm đăng ký' in df_bikes.columns:
-            df_bikes['Năm đăng ký'] = pd.to_numeric(df_bikes['Năm đăng ký'], errors='coerce')
-
-        df_clean = df_bikes[df_bikes['Giá'] > 1.0].copy() if 'Giá' in df_bikes.columns else pd.DataFrame()
-        if not df_clean.empty:
-            for (b, m), grp in df_clean.groupby(['Thương hiệu', 'Dòng xe']):
-                k = (str(b).strip().lower(), str(m).strip().lower())
-                model_medians_ci[k] = float(grp['Giá'].median())
-
-            for (b, t), grp in df_clean.groupby(['Thương hiệu', 'Loại xe']):
-                k = (str(b).strip().lower(), str(t).strip().lower())
-                brand_type_medians_ci[k] = float(grp['Giá'].median())
-
-            for t, grp in df_clean.groupby('Loại xe'):
-                k = str(t).strip().lower()
-                type_medians_ci[k] = float(grp['Giá'].median())
-    else:
-        df_bikes = pd.DataFrame()
-        
-    return global_pipe, submodels_dict, df_bikes, model_medians_ci, brand_type_medians_ci, type_medians_ci
-
-global_pipe, submodels_dict, df_bikes, model_medians_ci, brand_type_medians_ci, type_medians_ci = load_ml_resources()
 
 ODO_RANGES = [
     ('-- Chọn --', 15000),
