@@ -1,7 +1,5 @@
-# 🏍️ HỆ THỐNG DỰ ĐOÁN GIÁ XE MÁY CỦ CHỢ TỐT & PHÁT HIỆN BẤT THƯỜNG (BÀI 2)
+# 🏍️ HỆ THỐNG DỰ ĐOÁN GIÁ XE MÁY CỦ CHỢ TỐT & PHÁT HIỆN BẤT THƯỜNG 
 
-**Đồ án Tốt nghiệp Data Science (Lớp DL07_K314)**  
-**Học viên:** Nguyễn Văn Nam & Lê Văn Lưu  
 
 ---
 
