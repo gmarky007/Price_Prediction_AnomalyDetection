@@ -1,0 +1,13 @@
+# Python Cache & Compiled Files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environments & IDE Cache
+.venv/
+env/
+.history/
+.vscode/
+.idea/
+.DS_Store
