@@ -179,6 +179,27 @@ def parse_price_value(val):
         return round(v, 1)
     return np.nan
 
+import pickle
+import warnings
+warnings.filterwarnings('ignore')
+
+class CompatibilityUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module == 'pipeline':
+            if hasattr(np, name):
+                return getattr(np, name)
+            if hasattr(sklearn.pipeline, name):
+                return getattr(sklearn.pipeline, name)
+        if module.startswith('numpy._core'):
+            mod_sub = module.replace('numpy._core', 'numpy.core')
+            try:
+                m = __import__(module, fromlist=[name])
+                return getattr(m, name)
+            except ModuleNotFoundError:
+                m = __import__(mod_sub, fromlist=[name])
+                return getattr(m, name)
+        return super().find_class(module, name)
+
 @st.cache_resource
 def load_ml_resources():
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -190,17 +211,26 @@ def load_ml_resources():
     
     global_pipe = None
     submodels_dict = {}
-    try:
-        if os.path.exists(global_path):
+    
+    if os.path.exists(global_path):
+        try:
             global_pipe = joblib.load(global_path)
-    except Exception as e:
-        st.error(f"Lỗi nạp global_pipeline.pkl: {e}")
+        except Exception:
+            try:
+                with open(global_path, 'rb') as f:
+                    global_pipe = CompatibilityUnpickler(f).load()
+            except Exception as e:
+                st.error(f"Lỗi nạp global_pipeline.pkl: {e}")
         
-    try:
-        if os.path.exists(submodels_path):
+    if os.path.exists(submodels_path):
+        try:
             submodels_dict = joblib.load(submodels_path)
-    except Exception as e:
-        st.error(f"Lỗi nạp submodels_trained.pkl: {e}")
+        except Exception:
+            try:
+                with open(submodels_path, 'rb') as f:
+                    submodels_dict = CompatibilityUnpickler(f).load()
+            except Exception as e:
+                st.error(f"Lỗi nạp submodels_trained.pkl: {e}")
     
     # Vá lỗi tương thích phiên bản scikit-learn (SimpleImputer._fill_dtype -> _fit_dtype)
     from sklearn.impute import SimpleImputer
