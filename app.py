@@ -13,6 +13,16 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+# Cross-version pickle compatibility shims cho Streamlit Cloud (Linux)
+import sys
+import sklearn.pipeline
+import sklearn.compose
+import sklearn.impute
+import sklearn.preprocessing
+
+sys.modules['pipeline'] = sklearn.pipeline
+sys.modules['sklearn.pipeline.Pipeline'] = sklearn.pipeline.Pipeline
+
 # -------------------------------------------------------------
 # 1. THIẾT LẬP CẤU HÌNH TRANG STREAMLIT & ENTERPRISE DESIGN SYSTEM
 # -------------------------------------------------------------
